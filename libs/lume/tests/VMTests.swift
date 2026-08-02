@@ -111,6 +111,33 @@ func testVMRunAndStop() async throws {
     runTask.cancel()
 }
 
+@Test("VM lock holder selection excludes the stopping process")
+func testVMLockHolderSelectionExcludesSelf() {
+    let output = """
+        p91633
+        p98700
+        """
+
+    #expect(VM.lockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
+}
+
+@Test("VM lock holder selection ignores malformed lsof records")
+func testVMLockHolderSelectionIgnoresMalformedRecords() {
+    let output = """
+        f12
+        pnot-a-pid
+        nconfig.json
+        p98700
+        """
+
+    #expect(VM.lockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
+}
+
+@Test("VM lock holder selection rejects an output containing only self")
+func testVMLockHolderSelectionRejectsOnlySelf() {
+    #expect(VM.lockHolderPID(fromLsofOutput: "p91633\n", excluding: 91633) == nil)
+}
+
 @MainActor
 @Test("VM configuration updates")
 func testVMConfigurationUpdates() async throws {

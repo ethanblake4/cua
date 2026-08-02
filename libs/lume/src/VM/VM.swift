@@ -740,8 +740,7 @@ class VM {
 
         let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
         guard let outputString = String(data: outputData, encoding: .utf8),
-            let pidString = outputString.split(separator: "\n").first?.dropFirst(),  // Drop the 'p' prefix
-            let pid = pid_t(pidString)
+            let pid = Self.lockHolderPID(fromLsofOutput: outputString, excluding: getpid())
         else {
             try? fileHandle.close()
             Logger.info(
@@ -822,6 +821,19 @@ class VM {
         unlockConfigFile()
 
         throw VMError.internalError("Failed to stop VM process")
+    }
+
+    nonisolated static func lockHolderPID(
+        fromLsofOutput output: String, excluding excludedPID: pid_t
+    )
+        -> pid_t?
+    {
+        output.split(separator: "\n")
+            .compactMap { line -> pid_t? in
+                guard line.first == "p" else { return nil }
+                return pid_t(line.dropFirst())
+            }
+            .first { $0 != excludedPID }
     }
 
     // Helper method to forcibly clear any locks on the config file
