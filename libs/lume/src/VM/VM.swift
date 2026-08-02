@@ -229,7 +229,15 @@ class VM {
                 flock(retryHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0
             {
                 Logger.info("Emergency lock cleanup worked", metadata: ["name": vmDirContext.name])
-                fileHandle = retryHandle
+                // Continue with a fresh file handle
+                try? retryHandle.close()
+                // Get a completely new file handle to be safe
+                guard let newHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
+                else {
+                    throw VMError.internalError("Failed to open file handle after lock cleanup")
+                }
+                // Update our main file handle
+                fileHandle = newHandle
             } else {
                 // If we still can't get the lock, give up
                 Logger.error(
@@ -702,32 +710,12 @@ class VM {
             }
         }
 
-        // Try to open config file to get file descriptor
-        Logger.info(
-            "Attempting to access config file lock",
-            metadata: [
-                "path": vmDirContext.dir.configPath.path,
-                "name": vmDirContext.name,
-            ])
-        let fileHandle = try? FileHandle(forReadingFrom: vmDirContext.dir.configPath.url)
-        guard let fileHandle = fileHandle else {
-            Logger.info(
-                "Failed to open config file - VM may not be running",
-                metadata: ["name": vmDirContext.name])
-
-            // Even though we couldn't open the file, try to force unlock anyway
-            unlockConfigFile()
-
-            throw VMError.notRunning(vmDirContext.name)
-        }
-
         let pid: pid_t
         if let owner = VMProcessOwnerRegistry.validatedOwner(for: vmDirContext.dir) {
             pid = owner.processIdentifier
             Logger.info(
                 "Found verified VM owner process \(pid)", metadata: ["name": vmDirContext.name])
         } else if VMProcessOwnerRegistry.ownerRecordExists(for: vmDirContext.dir) {
-            try? fileHandle.close()
             Logger.error(
                 "Refusing to signal an unverified VM owner process",
                 metadata: ["name": vmDirContext.name])
@@ -751,7 +739,6 @@ class VM {
                 let legacyPID = Self.legacyLockHolderPID(
                     fromLsofOutput: outputString, excluding: getpid())
             else {
-                try? fileHandle.close()
                 Logger.info(
                     "Failed to find legacy VM process holding lock",
                     metadata: ["name": vmDirContext.name])
@@ -783,8 +770,6 @@ class VM {
                 Logger.info("Process \(pid) has terminated", metadata: ["name": vmDirContext.name])
                 virtualizationService = nil
                 vncService.stop()
-                try? fileHandle.close()
-
                 // Force unlock the config file
                 unlockConfigFile()
 
@@ -809,8 +794,6 @@ class VM {
             // Do final cleanup
             virtualizationService = nil
             vncService.stop()
-            try? fileHandle.close()
-
             // Force unlock the config file
             unlockConfigFile()
 
@@ -819,7 +802,6 @@ class VM {
         }
 
         // If we get here, something went very wrong
-        try? fileHandle.close()
         Logger.error(
             "Failed to stop VM - could not terminate process \(pid)",
             metadata: ["name": vmDirContext.name])
