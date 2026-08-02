@@ -118,7 +118,7 @@ func testVMLockHolderSelectionExcludesSelf() {
         p98700
         """
 
-    #expect(VM.lockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
+    #expect(VM.legacyLockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
 }
 
 @Test("VM lock holder selection ignores malformed lsof records")
@@ -130,12 +130,68 @@ func testVMLockHolderSelectionIgnoresMalformedRecords() {
         p98700
         """
 
-    #expect(VM.lockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
+    #expect(VM.legacyLockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
 }
 
 @Test("VM lock holder selection rejects an output containing only self")
 func testVMLockHolderSelectionRejectsOnlySelf() {
-    #expect(VM.lockHolderPID(fromLsofOutput: "p91633\n", excluding: 91633) == nil)
+    #expect(VM.legacyLockHolderPID(fromLsofOutput: "p91633\n", excluding: 91633) == nil)
+}
+
+@Test("VM process fingerprint identifies the current process instance")
+func testVMProcessFingerprintIdentifiesCurrentProcess() throws {
+    let first = try #require(VMProcessFingerprint.current())
+    let second = try #require(VMProcessFingerprint.current())
+
+    #expect(first == second)
+    #expect(first.processIdentifier == getpid())
+    #expect(!first.executablePath.isEmpty)
+}
+
+@Test("VM owner registry validates and removes its own record")
+func testVMOwnerRegistryLifecycle() throws {
+    let tempDir = try createTempDirectory()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let vmDirectory = VMDirectory(Path(tempDir.path))
+
+    let owner = try VMProcessOwnerRegistry.register(vmDirectory: vmDirectory)
+    #expect(VMProcessOwnerRegistry.validatedOwner(for: vmDirectory) == owner)
+
+    VMProcessOwnerRegistry.unregister(owner, vmDirectory: vmDirectory)
+    #expect(!VMProcessOwnerRegistry.ownerRecordExists(for: vmDirectory))
+}
+
+@Test("VM owner cleanup preserves a replacement generation")
+func testVMOwnerCleanupPreservesReplacementGeneration() throws {
+    let tempDir = try createTempDirectory()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let vmDirectory = VMDirectory(Path(tempDir.path))
+
+    let oldOwner = try VMProcessOwnerRegistry.register(vmDirectory: vmDirectory)
+    let replacementOwner = try VMProcessOwnerRegistry.register(vmDirectory: vmDirectory)
+    VMProcessOwnerRegistry.unregister(oldOwner, vmDirectory: vmDirectory)
+
+    #expect(VMProcessOwnerRegistry.validatedOwner(for: vmDirectory) == replacementOwner)
+}
+
+@Test("VM owner registry rejects a reused process identifier")
+func testVMOwnerRegistryRejectsReusedProcessIdentifier() throws {
+    let tempDir = try createTempDirectory()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let vmDirectory = VMDirectory(Path(tempDir.path))
+    let owner = try VMProcessOwnerRegistry.register(vmDirectory: vmDirectory)
+    let staleFingerprint = VMProcessFingerprint(
+        processIdentifier: owner.processIdentifier,
+        startTimeSeconds: owner.fingerprint.startTimeSeconds + 1,
+        startTimeMicroseconds: owner.fingerprint.startTimeMicroseconds,
+        executablePath: owner.fingerprint.executablePath)
+    let staleOwner = VMProcessOwner(
+        fingerprint: staleFingerprint, generation: owner.generation)
+    let ownerFile = vmDirectory.dir.file(".vm-process-owner.json").url
+    try JSONEncoder().encode(staleOwner).write(to: ownerFile, options: .atomic)
+
+    #expect(VMProcessOwnerRegistry.validatedOwner(for: vmDirectory) == nil)
+    #expect(VMProcessOwnerRegistry.ownerRecordExists(for: vmDirectory))
 }
 
 @MainActor

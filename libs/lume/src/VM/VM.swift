@@ -229,15 +229,7 @@ class VM {
                 flock(retryHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0
             {
                 Logger.info("Emergency lock cleanup worked", metadata: ["name": vmDirContext.name])
-                // Continue with a fresh file handle
-                try? retryHandle.close()
-                // Get a completely new file handle to be safe
-                guard let newHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
-                else {
-                    throw VMError.internalError("Failed to open file handle after lock cleanup")
-                }
-                // Update our main file handle
-                fileHandle = newHandle
+                fileHandle = retryHandle
             } else {
                 // If we still can't get the lock, give up
                 Logger.error(
@@ -250,6 +242,10 @@ class VM {
         defer {
             flock(fileHandle.fileDescriptor, LOCK_UN)
             try? fileHandle.close()
+        }
+        let processOwner = try VMProcessOwnerRegistry.register(vmDirectory: vmDirContext.dir)
+        defer {
+            VMProcessOwnerRegistry.unregister(processOwner, vmDirectory: vmDirContext.dir)
         }
         sessionCleanedUp = false
         activeSharedDirectories = sharedDirectories
@@ -725,32 +721,43 @@ class VM {
             throw VMError.notRunning(vmDirContext.name)
         }
 
-        // Get the PID of the process holding the lock using lsof command
-        Logger.info(
-            "Finding process holding lock on config file", metadata: ["name": vmDirContext.name])
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-F", "p", vmDirContext.dir.configPath.path]
-
-        let outputPipe = Pipe()
-        task.standardOutput = outputPipe
-
-        try task.run()
-        task.waitUntilExit()
-
-        let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
-        guard let outputString = String(data: outputData, encoding: .utf8),
-            let pid = Self.lockHolderPID(fromLsofOutput: outputString, excluding: getpid())
-        else {
-            try? fileHandle.close()
+        let pid: pid_t
+        if let owner = VMProcessOwnerRegistry.validatedOwner(for: vmDirContext.dir) {
+            pid = owner.processIdentifier
             Logger.info(
-                "Failed to find process holding lock - VM may not be running",
+                "Found verified VM owner process \(pid)", metadata: ["name": vmDirContext.name])
+        } else if VMProcessOwnerRegistry.ownerRecordExists(for: vmDirContext.dir) {
+            try? fileHandle.close()
+            Logger.error(
+                "Refusing to signal an unverified VM owner process",
                 metadata: ["name": vmDirContext.name])
-
-            // Even though we couldn't find the process, try to force unlock
-            unlockConfigFile()
-
             throw VMError.notRunning(vmDirContext.name)
+        } else {
+            // VMs started by older Lume versions have no owner record.
+            Logger.info(
+                "Finding legacy VM process holding the config lock",
+                metadata: ["name": vmDirContext.name])
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+            task.arguments = ["-F", "p", vmDirContext.dir.configPath.path]
+
+            let outputPipe = Pipe()
+            task.standardOutput = outputPipe
+            try task.run()
+            task.waitUntilExit()
+
+            let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
+            guard let outputString = String(data: outputData, encoding: .utf8),
+                let legacyPID = Self.legacyLockHolderPID(
+                    fromLsofOutput: outputString, excluding: getpid())
+            else {
+                try? fileHandle.close()
+                Logger.info(
+                    "Failed to find legacy VM process holding lock",
+                    metadata: ["name": vmDirContext.name])
+                throw VMError.notRunning(vmDirContext.name)
+            }
+            pid = legacyPID
         }
 
         Logger.info(
@@ -823,7 +830,7 @@ class VM {
         throw VMError.internalError("Failed to stop VM process")
     }
 
-    nonisolated static func lockHolderPID(
+    nonisolated static func legacyLockHolderPID(
         fromLsofOutput output: String, excluding excludedPID: pid_t
     )
         -> pid_t?

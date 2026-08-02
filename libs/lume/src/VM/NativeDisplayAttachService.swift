@@ -15,20 +15,20 @@ enum NativeDisplayAttachError: LocalizedError {
   }
 }
 
-private struct NativeDisplayOwner: Codable {
-  let processIdentifier: Int32
+private struct NativeDisplayOwner: Codable, Equatable {
+  let vmProcessOwner: VMProcessOwner
 }
 
 /// Provides a small, process-local control channel for revealing the native viewer.
 ///
-/// The owning `lume run` process registers SIGUSR1 and writes its PID into the VM
-/// directory. An `attach` process verifies that PID still owns the VM configuration
-/// lock before signaling it. The signal never crosses into an unrelated Lume daemon.
+/// The owning `lume run` process registers SIGUSR1 and records its verified VM-owner
+/// identity. An `attach` process signals it only while that exact process is still alive.
 @MainActor
 enum NativeDisplayAttachService {
   private nonisolated static let ownerFileName = ".native-display-owner.json"
   private static var signalSource: DispatchSourceSignal?
   private static var ownerFileURL: URL?
+  private static var registeredOwner: NativeDisplayOwner?
   private static var showAction: (@MainActor @Sendable () async -> Void)?
 
   static func register(
@@ -37,7 +37,10 @@ enum NativeDisplayAttachService {
   ) throws {
     unregister()
 
-    let owner = NativeDisplayOwner(processIdentifier: getpid())
+    guard let vmProcessOwner = VMProcessOwnerRegistry.validatedOwner(for: vmDirectory) else {
+      throw NativeDisplayAttachError.unavailable
+    }
+    let owner = NativeDisplayOwner(vmProcessOwner: vmProcessOwner)
     let fileURL = ownerURL(for: vmDirectory)
     let data = try JSONEncoder().encode(owner)
     try data.write(to: fileURL, options: .atomic)
@@ -45,6 +48,7 @@ enum NativeDisplayAttachService {
 
     showAction = show
     ownerFileURL = fileURL
+    registeredOwner = owner
     signal(SIGUSR1, SIG_IGN)
 
     let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
@@ -62,26 +66,27 @@ enum NativeDisplayAttachService {
     signalSource = nil
     showAction = nil
 
-    if let ownerFileURL,
+    if let ownerFileURL, let registeredOwner,
       let data = try? Data(contentsOf: ownerFileURL),
       let owner = try? JSONDecoder().decode(NativeDisplayOwner.self, from: data),
-      owner.processIdentifier == getpid()
+      owner == registeredOwner
     {
       try? FileManager.default.removeItem(at: ownerFileURL)
     }
     ownerFileURL = nil
+    registeredOwner = nil
   }
 
   nonisolated static func isAvailable(vmDirectory: VMDirectory) -> Bool {
     guard let owner = validatedOwner(for: vmDirectory) else { return false }
-    return kill(owner.processIdentifier, 0) == 0
+    return kill(owner.vmProcessOwner.processIdentifier, 0) == 0
   }
 
   nonisolated static func requestNativeDisplay(vmDirectory: VMDirectory) throws {
     guard let owner = validatedOwner(for: vmDirectory) else {
       throw NativeDisplayAttachError.unavailable
     }
-    guard kill(owner.processIdentifier, SIGUSR1) == 0 else {
+    guard kill(owner.vmProcessOwner.processIdentifier, SIGUSR1) == 0 else {
       throw NativeDisplayAttachError.requestFailed
     }
   }
@@ -92,8 +97,7 @@ enum NativeDisplayAttachService {
     let fileURL = ownerURL(for: vmDirectory)
     guard let data = try? Data(contentsOf: fileURL),
       let owner = try? JSONDecoder().decode(NativeDisplayOwner.self, from: data),
-      owner.processIdentifier > 0,
-      owner.processIdentifier == lockOwnerPID(for: vmDirectory.configPath.url)
+      owner.vmProcessOwner == VMProcessOwnerRegistry.validatedOwner(for: vmDirectory)
     else {
       return nil
     }
@@ -104,28 +108,4 @@ enum NativeDisplayAttachService {
     vmDirectory.dir.file(ownerFileName).url
   }
 
-  private nonisolated static func lockOwnerPID(for configURL: URL) -> Int32? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-    process.arguments = ["-t", configURL.path]
-    let output = Pipe()
-    process.standardOutput = output
-    process.standardError = FileHandle.nullDevice
-
-    do {
-      try process.run()
-      process.waitUntilExit()
-      guard process.terminationStatus == 0,
-        let data = try output.fileHandleForReading.readToEnd(),
-        let value = String(data: data, encoding: .utf8)?
-          .split(whereSeparator: \.isNewline).first,
-        let pid = Int32(value)
-      else {
-        return nil
-      }
-      return pid
-    } catch {
-      return nil
-    }
-  }
 }
