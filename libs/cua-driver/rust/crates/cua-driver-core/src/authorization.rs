@@ -211,6 +211,7 @@ const EXISTING_PROFILE_REVOCATION: &[&str] = &[
 const PRIVATE_OBSERVATION_OPERATIONS: &[&str] = &[
     "get_desktop_state",
     "get_accessibility_tree",
+    "get_application_state",
     "get_window_state",
     "verify_state",
     "list_apps",
@@ -698,6 +699,7 @@ pub fn enforcement_adapters_for_call(
         tool,
         "get_desktop_state"
             | "get_accessibility_tree"
+            | "get_application_state"
             | "get_window_state"
             | "verify_state"
             | "list_apps"
@@ -867,6 +869,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "debug_window_info"
         | "check_permissions"
         | "get_accessibility_tree"
+        | "get_application_state"
         | "verify_state"
         | "set_config"
         | "escalate_session"
@@ -975,6 +978,7 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             operation_sensitive: true,
         },
         "get_accessibility_tree"
+        | "get_application_state"
         | "list_apps"
         | "list_windows"
         | "debug_window_info"
@@ -1153,6 +1157,7 @@ fn enforce_hard_invariants(
             | "kill_app"
             | "bring_to_front"
             | "get_accessibility_tree"
+            | "get_application_state"
             | "get_window_state"
             | "verify_state"
             | "page"
