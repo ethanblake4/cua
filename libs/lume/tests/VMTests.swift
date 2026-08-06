@@ -111,18 +111,53 @@ func testVMRunAndStop() async throws {
     runTask.cancel()
 }
 
-@Test("Legacy VM lock holder selection excludes self and malformed records")
-func testLegacyVMLockHolderSelection() {
-    let output = """
-        f12
-        p91633
-        pnot-a-pid
-        nconfig.json
-        p98700
-        """
+@MainActor
+@Test("Legacy VM stop does not signal an unrelated config reader")
+func testLegacyVMStopRefusesUnverifiedConfigReaders() async throws {
+    let tempDir = try createTempDirectory()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let vmDir = try setupVMDirectory(tempDir)
+    let lockHandle = try FileHandle(forWritingTo: vmDir.configPath.url)
+    #expect(flock(lockHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
+    defer {
+        flock(lockHandle.fileDescriptor, LOCK_UN)
+        try? lockHandle.close()
+    }
 
-    #expect(VM.legacyLockHolderPID(fromLsofOutput: output, excluding: 91633) == 98700)
-    #expect(VM.legacyLockHolderPID(fromLsofOutput: "p91633\n", excluding: 91633) == nil)
+    let readerHandle = try FileHandle(forReadingFrom: vmDir.configPath.url)
+    let unrelatedReader = Process()
+    unrelatedReader.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    unrelatedReader.arguments = ["60"]
+    unrelatedReader.standardInput = readerHandle
+    try unrelatedReader.run()
+    try readerHandle.close()
+    defer {
+        if unrelatedReader.isRunning {
+            unrelatedReader.terminate()
+        }
+        unrelatedReader.waitUntilExit()
+    }
+
+    let context = VMDirContext(
+        dir: vmDir,
+        config: try vmDir.loadConfig(),
+        home: Home(fileManager: FileManager.default),
+        storage: nil)
+    let vm = MockVM(
+        vmDirContext: context,
+        virtualizationServiceFactory: { _ in MockVMVirtualizationService() },
+        vncServiceFactory: { MockVNCService(vmDirectory: $0) }
+    )
+
+    do {
+        try await vm.stop()
+        Issue.record("Expected stop to reject the unverified legacy VM")
+    } catch VMError.unverifiedProcessOwner(let name) {
+        #expect(name == vmDir.name)
+    } catch {
+        Issue.record("Unexpected stop error: \(error)")
+    }
+    #expect(unrelatedReader.isRunning)
 }
 
 @Test("VM owner registry validates the current process and removes its record")

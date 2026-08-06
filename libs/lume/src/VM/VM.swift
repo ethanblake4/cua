@@ -719,32 +719,14 @@ class VM {
             Logger.error(
                 "Refusing to signal an unverified VM owner process",
                 metadata: ["name": vmDirContext.name])
-            throw VMError.notRunning(vmDirContext.name)
+            throw VMError.unverifiedProcessOwner(vmDirContext.name)
         } else {
-            // VMs started by older Lume versions have no owner record.
-            Logger.info(
-                "Finding legacy VM process holding the config lock",
+            // A process opening config.json is not proof that it owns the VM. Older Lume
+            // versions did not write an owner record, so fail closed instead of guessing.
+            Logger.error(
+                "Refusing to signal a legacy VM without a verified owner record",
                 metadata: ["name": vmDirContext.name])
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-            task.arguments = ["-F", "p", vmDirContext.dir.configPath.path]
-
-            let outputPipe = Pipe()
-            task.standardOutput = outputPipe
-            try task.run()
-            task.waitUntilExit()
-
-            let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
-            guard let outputString = String(data: outputData, encoding: .utf8),
-                let legacyPID = Self.legacyLockHolderPID(
-                    fromLsofOutput: outputString, excluding: getpid())
-            else {
-                Logger.info(
-                    "Failed to find legacy VM process holding lock",
-                    metadata: ["name": vmDirContext.name])
-                throw VMError.notRunning(vmDirContext.name)
-            }
-            pid = legacyPID
+            throw VMError.unverifiedProcessOwner(vmDirContext.name)
         }
 
         Logger.info(
@@ -810,19 +792,6 @@ class VM {
         unlockConfigFile()
 
         throw VMError.internalError("Failed to stop VM process")
-    }
-
-    nonisolated static func legacyLockHolderPID(
-        fromLsofOutput output: String, excluding excludedPID: pid_t
-    )
-        -> pid_t?
-    {
-        output.split(separator: "\n")
-            .compactMap { line -> pid_t? in
-                guard line.first == "p" else { return nil }
-                return pid_t(line.dropFirst())
-            }
-            .first { $0 != excludedPID }
     }
 
     // Helper method to forcibly clear any locks on the config file
