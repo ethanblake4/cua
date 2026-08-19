@@ -43,3 +43,19 @@ bound or enumeration failure skipping a node or subtree. Reaching
 `query` projects the returned Markdown and structured element rows, but does
 not make the underlying snapshot incomplete; compare `total_element_count`
 with `returned_element_count` to measure that projection.
+
+On Windows, `get_window_state` explicitly distinguishes the two coordinate
+spaces in its structured payload:
+
+- `elements[].frame` is in `screen_physical_px`, as declared by
+  `element_frame_coordinate_space`. Frames wholly outside the exact target
+  `window_bounds` are omitted and carry
+  `frame_reliability:"outside_target_window"` instead.
+- Pixel-action `x,y` values are in `window_screenshot_px`, as declared by
+  `pixel_action_coordinate_space`. When a screenshot is present,
+  `pixel_action_to_screen` gives its screen origin and physical-screen pixels
+  per action pixel. Convert with
+  `screen = screen_origin + action * screen_pixels_per_action_pixel`.
+
+The accessibility elements remain one structured `elements` array; coordinate
+metadata does not add a second rendering of the tree.
