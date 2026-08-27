@@ -1,6 +1,6 @@
 {
   "name": "@trycua/computer",
-  "version": "0.1.7",
+  "version": "0.2.1",
   "packageManager": "pnpm@10.11.0",
   "description": "Typescript SDK for Cua computer interaction",
   "type": "module",
@@ -42,7 +42,7 @@
     "pretypecheck": "pnpm --filter @trycua/core build && pnpm --filter @trycua/fleet build"
   },
   "dependencies": {
-    "@trycua/core": "workspace:^",
+    "@trycua/core": "workspace:^0.1.4",
     "pino": "^9.7.0",
     "uuid": "^11.1.1",
     "ws": "^8.21.0",

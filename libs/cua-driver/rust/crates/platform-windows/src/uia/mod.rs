@@ -67,8 +67,8 @@ pub struct UiaNode {
     pub selected: Option<bool>,
     /// Raw COM pointer (IUIAutomationElement for UIA path, IAccessible for
     /// MSAA path) as usize. Non-zero if and only if `element_index` is `Some`.
-    /// A stored snapshot adopts the retained reference for indexed nodes. A
-    /// walk that is not cached must release it through the matching vtable.
+    /// `UiaTreeResult` owns the retained reference until a stored snapshot
+    /// explicitly adopts it.
     pub element_ptr: usize,
     /// Screen-coordinate center, captured at walk time to avoid later COM calls.
     pub center_x: i32,
@@ -97,6 +97,26 @@ pub struct UiaNode {
 pub struct UiaTreeResult {
     pub tree_markdown: String,
     pub nodes: Vec<UiaNode>,
+}
+
+impl Drop for UiaTreeResult {
+    fn drop(&mut self) {
+        use windows::Win32::UI::Accessibility::IAccessible;
+
+        for node in &mut self.nodes {
+            let element_ptr = std::mem::take(&mut node.element_ptr);
+            if element_ptr == 0 {
+                continue;
+            }
+            unsafe {
+                if node.msaa_role.is_some() {
+                    drop(IAccessible::from_raw(element_ptr as *mut _));
+                } else {
+                    drop(IUIAutomationElement::from_raw(element_ptr as *mut _));
+                }
+            }
+        }
+    }
 }
 
 /// Walk the UIA tree for the window with the given HWND.
@@ -147,20 +167,6 @@ fn exact_menu_path_matches(nodes: &[UiaNode], path: &[String]) -> Vec<usize> {
         .collect()
 }
 
-pub(crate) unsafe fn release_walk_nodes(nodes: Vec<UiaNode>) {
-    use windows::Win32::UI::Accessibility::IAccessible;
-    for node in nodes {
-        if node.element_ptr == 0 {
-            continue;
-        }
-        if node.msaa_role.is_some() {
-            drop(IAccessible::from_raw(node.element_ptr as *mut _));
-        } else {
-            drop(IUIAutomationElement::from_raw(node.element_ptr as *mut _));
-        }
-    }
-}
-
 unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result<(), String> {
     let element =
         std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
@@ -200,14 +206,8 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
         let matches = exact_menu_path_matches(&result.nodes, &path[..=depth]);
         let target_index = match matches.as_slice() {
             [index] => *index,
-            [] => {
-                unsafe { release_walk_nodes(result.nodes) };
-                return Err(format!("menu path segment {depth} was not found"));
-            }
-            _ => {
-                unsafe { release_walk_nodes(result.nodes) };
-                return Err(format!("menu path segment {depth} is ambiguous"));
-            }
+            [] => return Err(format!("menu path segment {depth} was not found")),
+            _ => return Err(format!("menu path segment {depth} is ambiguous")),
         };
         let target = &result.nodes[target_index];
         let error = if target.enabled == Some(false) {
@@ -219,7 +219,6 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
         } else {
             unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len()) }.err()
         };
-        unsafe { release_walk_nodes(result.nodes) };
         if let Some(error) = error {
             return Err(format!("menu path segment {depth}: {error}"));
         }
@@ -1087,7 +1086,7 @@ fn filter_tree(markdown: &str, query: &str) -> String {
 mod tests {
     use super::*;
 
-    fn node(
+    pub(super) fn node(
         element_index: Option<usize>,
         control_type: &str,
         name: &str,
